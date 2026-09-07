@@ -1,0 +1,19 @@
+-- Notification feature migration
+-- 1) Bảng thông báo
+CREATE TABLE IF NOT EXISTS notification (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    RECIPIENT_AGENT_ID INT NOT NULL,
+    TYPE VARCHAR(50),
+    TITLE VARCHAR(255),
+    MESSAGE VARCHAR(1000),
+    LINK_TAB VARCHAR(50),
+    REF_ID INT,
+    IS_READ TINYINT(1) DEFAULT 0,
+    CREATED_DATETIME DATETIME DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_notification_recipient (RECIPIENT_AGENT_ID),
+    INDEX idx_notification_unread (RECIPIENT_AGENT_ID, IS_READ)
+);
+
+-- 2) Cờ nhắc lịch hẹn theo 2 mốc (24h / 1h) cho bảng appointment
+ALTER TABLE appointment ADD COLUMN NOTIFIED_24H TINYINT(1) DEFAULT 0;
+ALTER TABLE appointment ADD COLUMN NOTIFIED_1H TINYINT(1) DEFAULT 0;
