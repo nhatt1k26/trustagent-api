@@ -48,8 +48,10 @@ def _get_managed_children(
 ) -> List[TreeNode]:
     """
     Đệ quy lấy đội ngũ theo quyền quản lý (manage_id):
-    - Lấy các UserRegister có manage_id == manager_agent_id (đã duyệt).
-    - Với mỗi thành viên, nếu họ đã có tài khoản agent thì tiếp tục lấy đội ngũ họ quản lý.
+    - Lấy các UserRegister có manage_id == manager_agent_id và đã được duyệt (status = APPROVED).
+    - CHỈ giữ thành viên đã có tài khoản trong AGENT_DETAIL (khớp qua email);
+      bỏ qua các bản ghi đăng ký chưa tạo tài khoản (pending).
+    - Với mỗi thành viên, tiếp tục lấy đội ngũ họ quản lý.
     """
     if current_depth > max_depth:
         return []
@@ -57,41 +59,39 @@ def _get_managed_children(
     registrations = (
         db.query(UserRegister)
         .filter(UserRegister.manage_id == manager_agent_id)
-        .filter(UserRegister.status.in_(["APPROVED", "ACTIVATED", "PROFILE_VERIFYING"]))
+        .filter(UserRegister.status == "APPROVED")
         .order_by(UserRegister.created_datetime.asc())
         .all()
     )
 
     children: List[TreeNode] = []
     for reg in registrations:
-        # Thành viên này có tài khoản agent không? (match theo email)
-        linked_agent: Optional[AgentDetail] = None
-        if reg.email:
-            linked_agent = db.query(AgentDetail).filter_by(email=reg.email).first()
+        # Thành viên này phải đã có tài khoản agent (match theo email) mới đưa vào đội ngũ.
+        if not reg.email:
+            continue
+        linked_agent: Optional[AgentDetail] = (
+            db.query(AgentDetail).filter_by(email=reg.email).first()
+        )
+        if not linked_agent:
+            continue
 
-        child_agent_id = linked_agent.id if linked_agent else None
-        child_refer_code = linked_agent.refer_code if linked_agent else None
-        child_username = linked_agent.username if linked_agent else None
-        child_rank = linked_agent.rank if linked_agent else None
+        child_agent_id = linked_agent.id
+        child_refer_code = linked_agent.refer_code
+        child_username = linked_agent.username
+        child_rank = linked_agent.rank
 
         level_label = f"Thành viên F{current_depth}"
 
-        # Đếm số thành viên mà người này đang quản lý
-        has_grandchildren = False
-        if child_agent_id:
-            count = (
-                db.query(UserRegister)
-                .filter(UserRegister.manage_id == child_agent_id)
-                .filter(UserRegister.status.in_(["APPROVED", "ACTIVATED", "PROFILE_VERIFYING"]))
-                .count()
-            )
-            has_grandchildren = count > 0
+        # Đếm số thành viên (đã có tài khoản) mà người này đang quản lý
+        grandchildren = _get_managed_children(
+            child_agent_id, db, current_depth + 1, max_depth
+        ) if current_depth < max_depth else None
 
-        grandchildren = None
-        if current_depth < max_depth and child_agent_id:
-            grandchildren = _get_managed_children(
-                child_agent_id, db, current_depth + 1, max_depth
-            )
+        if grandchildren is not None:
+            has_grandchildren = len(grandchildren) > 0
+        else:
+            # Chưa đệ quy sâu hơn (đạt max_depth) -> đếm nhanh để biết còn con hay không
+            has_grandchildren = _has_managed_children(child_agent_id, db)
 
         children.append(TreeNode(
             id=str(reg.id),
@@ -106,6 +106,20 @@ def _get_managed_children(
         ))
 
     return children
+
+
+def _has_managed_children(manager_agent_id: int, db: Session) -> bool:
+    """Kiểm tra agent có thành viên đội ngũ nào (đã có tài khoản AGENT_DETAIL) hay không."""
+    registrations = (
+        db.query(UserRegister)
+        .filter(UserRegister.manage_id == manager_agent_id)
+        .filter(UserRegister.status == "APPROVED")
+        .all()
+    )
+    for reg in registrations:
+        if reg.email and db.query(AgentDetail).filter_by(email=reg.email).first():
+            return True
+    return False
 
 
 def _get_children_for_refer_code(

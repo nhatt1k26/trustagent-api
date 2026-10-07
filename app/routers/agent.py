@@ -209,21 +209,25 @@ def get_team_members(
     if not agent:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Agent không tồn tại.")
 
-    # Đội ngũ TRỰC TIẾP = các thành viên được Admin gán cho agent này quản lý (manage_id)
+    # Đội ngũ TRỰC TIẾP = các thành viên được Admin gán cho agent này quản lý (manage_id).
+    # CHỈ hiển thị thành viên đã được duyệt/kích hoạt (status = APPROVED).
     registrations = (
         db.query(UserRegister)
         .filter(UserRegister.manage_id == agent.id)
-        .filter(UserRegister.status.in_(["APPROVED", "ACTIVATED", "PROFILE_VERIFYING"]))
+        .filter(UserRegister.status == "APPROVED")
         .order_by(UserRegister.created_datetime.desc())
         .all()
     )
 
     team_list = []
     for r in registrations:
-        # Check if this person has created an account (by email)
-        linked_agent = None
-        if r.email:
-            linked_agent = db.query(AgentDetail).filter_by(email=r.email).first()
+        # CHỈ đưa vào đội ngũ thành viên đã có tài khoản trong AGENT_DETAIL (khớp qua email).
+        # Bỏ qua các bản ghi đăng ký chưa tạo tài khoản (pending).
+        if not r.email:
+            continue
+        linked_agent = db.query(AgentDetail).filter_by(email=r.email).first()
+        if not linked_agent:
+            continue
 
         team_list.append({
             "id": r.id,
@@ -233,8 +237,8 @@ def get_team_members(
             "register_code": r.register_code,
             "status": r.status,
             "type": r.type,
-            "has_account": linked_agent is not None,
-            "agent_refer_code": linked_agent.refer_code if linked_agent else None,
+            "has_account": True,
+            "agent_refer_code": linked_agent.refer_code,
             "ekyc_status": "verified" if r.status == "APPROVED" else "pending",
             "joined_date": r.created_datetime.strftime("%d/%m/%Y") if r.created_datetime else None,
             # Future: add real sales data from contracts table

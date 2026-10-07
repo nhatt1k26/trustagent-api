@@ -127,15 +127,31 @@ def admin_list_registrations(
         query = query.filter(UserRegister.status == status_filter.upper())
 
     records = query.all()
-    return [
-        {
+
+    result = []
+    for r in records:
+        # Tài khoản agent của chính CTV này (khớp qua email) -> lấy mã giới thiệu của họ.
+        own_agent = None
+        if r.email:
+            own_agent = db.query(AgentDetail).filter_by(email=r.email).first()
+
+        # Người giới thiệu: r.refer_code là mã GT của người mời -> tìm agent sở hữu mã đó.
+        referrer_name = None
+        if r.refer_code:
+            referrer = db.query(AgentDetail).filter_by(refer_code=r.refer_code).first()
+            if referrer:
+                referrer_name = referrer.full_name or referrer.username
+
+        result.append({
             "id": r.id,
             "fullname": r.fullname,
             "gender": r.gender,
             "email": r.email,
             "phone": r.phone,
             "birthday": r.birthday.isoformat() if r.birthday else None,
-            "refer_code": r.refer_code,
+            "refer_code": r.refer_code,          # mã người GIỚI THIỆU CTV này
+            "referrer_name": referrer_name,      # họ tên người giới thiệu
+            "agent_refer_code": own_agent.refer_code if own_agent else None,  # mã GT của chính CTV (sau khi có TK)
             "register_code": r.register_code,
             "type": r.type,
             "status": r.status,
@@ -146,9 +162,8 @@ def admin_list_registrations(
             "insurance_company": r.insurance_company,
             "profile_detail": r.profile_detail,
             "created_datetime": r.created_datetime.isoformat() if r.created_datetime else None,
-        }
-        for r in records
-    ]
+        })
+    return result
 
 
 @router.put("/admin/agent-register/{reg_id}/approve")
@@ -427,3 +442,103 @@ def get_my_registration_status(
         "register_code": register_record.register_code,
         "fullname": register_record.fullname,
     }
+
+
+# ─── Admin: nhập liệu / bổ sung hồ sơ giúp CTV (khi hồ sơ còn PENDING) ──────────
+
+@router.put("/admin/agent-register/{reg_id}/profile")
+def admin_fill_profile(
+    reg_id: int,
+    req: OnboardingRequest,
+    username: str = Depends(get_current_username),
+    db: Session = Depends(get_db),
+):
+    """Admin bổ sung / nhập liệu hồ sơ giúp CTV.
+
+    Dùng cho các hồ sơ đang ở trạng thái PENDING (chờ bổ sung hồ sơ): Admin nhập
+    thông tin chi tiết thay cho CTV rồi chuyển sang PROFILE_VERIFYING (chờ duyệt).
+    """
+    credential = db.query(AgentCredential).filter_by(username=username).first()
+    if not credential or credential.role not in ("ROLE_ADMIN", "ROLE_AGENT"):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Không có quyền truy cập.")
+
+    record = db.query(UserRegister).filter_by(id=reg_id).first()
+    if not record:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Đăng ký không tồn tại.")
+
+    # Validate ảnh CCCD (base64) nếu Admin có tải lên
+    id_front = _validate_id_image(req.id_front, "Ảnh mặt trước CCCD")
+    id_back = _validate_id_image(req.id_back, "Ảnh mặt sau CCCD")
+
+    # Giữ lại ảnh cũ nếu Admin không cung cấp ảnh mới
+    existing: dict = {}
+    if record.profile_detail:
+        try:
+            existing = json.loads(record.profile_detail)
+        except (ValueError, TypeError):
+            existing = {}
+
+    profile_data = {
+        "fullName": req.full_name,
+        "gender": req.gender,
+        "birthday": req.birthday,
+        "phone": req.phone,
+        "email": req.email,
+        "idNumber": req.id_number,
+        "issueDate": req.issue_date,
+        "issuePlace": req.issue_place,
+        "temporaryAddress": req.temporary_address,
+        "address": req.address,
+        "bankName": req.bank_name,
+        "accountNumber": req.account_number,
+        "taxId": req.tax_id,
+        "hasInsuranceCode": req.has_insurance_code,
+        "insuranceCompany": req.insurance_company,
+        "idFrontUrl": id_front if id_front is not None else existing.get("idFrontUrl"),
+        "idBackUrl": id_back if id_back is not None else existing.get("idBackUrl"),
+    }
+    record.profile_detail = json.dumps(profile_data, ensure_ascii=False)
+
+    # Cập nhật các cột cơ bản trên bản ghi đăng ký
+    if req.full_name:
+        record.fullname = req.full_name
+    if req.gender:
+        record.gender = req.gender
+    if req.phone:
+        record.phone = req.phone
+    if req.email:
+        record.email = req.email
+    if req.birthday:
+        try:
+            record.birthday = datetime.strptime(req.birthday, "%Y-%m-%d").date()
+        except ValueError:
+            pass
+    if req.has_insurance_code is not None:
+        record.has_insurance_code = req.has_insurance_code
+    if req.insurance_company:
+        record.insurance_company = req.insurance_company
+
+    # Bổ sung xong -> chuyển sang chờ duyệt
+    record.status = "PROFILE_VERIFYING"
+
+    # Đồng bộ thông tin cơ bản sang AgentDetail nếu CTV đã có tài khoản
+    if record.email:
+        linked_agent = db.query(AgentDetail).filter_by(email=record.email).first()
+        if linked_agent:
+            if req.full_name:
+                linked_agent.full_name = req.full_name
+            if req.phone:
+                linked_agent.phone = req.phone
+            if req.gender:
+                linked_agent.gender = req.gender
+            if req.birthday:
+                try:
+                    linked_agent.birthday = datetime.strptime(req.birthday, "%Y-%m-%d").date()
+                except ValueError:
+                    pass
+            if req.address:
+                linked_agent.address = req.address
+
+    db.commit()
+
+    return {"message": f"Đã bổ sung hồ sơ cho {record.fullname}. Hồ sơ chuyển sang trạng thái chờ duyệt."}
