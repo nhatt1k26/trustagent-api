@@ -8,8 +8,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.database import Base, engine
+# Import models module để SQLAlchemy đăng ký các bảng của module lương-thưởng vào Base
+from app import models_compensation  # noqa: F401
 from app.routers import (
-    agent, appointment, consultation, contract, lead, notification, register, tree,
+    agent, analytics, appointment, compensation, consultation, contract, lead,
+    notification, register, snapshot, tree,
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -50,6 +53,9 @@ app.include_router(consultation.router)
 app.include_router(contract.router)
 app.include_router(notification.router)
 app.include_router(tree.router)
+app.include_router(compensation.router)
+app.include_router(analytics.router)
+app.include_router(snapshot.router)
 
 
 @app.get("/health")

@@ -35,3 +35,25 @@ def get_current_agent(
     if not agent:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Agent profile not found")
     return agent
+
+
+def require_privilege(code: str):
+    """Factory tạo dependency chặn truy cập nếu agent chưa mở khoá đặc quyền `code`.
+
+    Dùng cho các tính năng đặc quyền theo cấp (Zalo OA broadcast, chatbot cao cấp...):
+
+        @router.post("/zalo/broadcast")
+        def broadcast(agent = Depends(require_privilege("ZALO_OA_BROADCAST"))):
+            ...
+    """
+    def _dep(agent: AgentDetail = Depends(get_current_agent)) -> AgentDetail:
+        from app import achievements as ach
+        from app import compensation as comp
+        level = comp.rank_to_level(agent.rank)
+        if not ach.has_privilege(level, code):
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN,
+                "Tính năng này chỉ dành cho cấp bậc cao hơn. Hãy thăng cấp để mở khoá.",
+            )
+        return agent
+    return _dep
