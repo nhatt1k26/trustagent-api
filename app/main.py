@@ -1,7 +1,6 @@
 """TrustAgent API - FastAPI backend service for Trust-Agent-AIO frontend."""
 
 import logging
-from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -9,9 +8,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.database import Base, engine
-from app.kiro_acp import KiroACPManager
+# Import models module để SQLAlchemy đăng ký các bảng của module lương-thưởng vào Base
+from app import models_compensation  # noqa: F401
 from app.routers import (
-    agent, appointment, chat, consultation, contract, lead, notification, register, tree,
+    agent, analytics, appointment, compensation, consultation, contract, lead,
+    notification, register, snapshot, tree,
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -20,19 +21,7 @@ logger = logging.getLogger(__name__)
 # Auto-create tables if they don't exist
 Base.metadata.create_all(bind=engine)
 
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Khởi động/tắt manager Kiro ACP cùng vòng đời ứng dụng."""
-    manager = KiroACPManager.get_instance()
-    await manager.start()
-    try:
-        yield
-    finally:
-        await manager.stop()
-
-
-app = FastAPI(title="TrustAgent API", version="1.0.0", lifespan=lifespan)
+app = FastAPI(title="TrustAgent API", version="1.0.0")
 
 
 @app.exception_handler(RequestValidationError)
@@ -64,7 +53,9 @@ app.include_router(consultation.router)
 app.include_router(contract.router)
 app.include_router(notification.router)
 app.include_router(tree.router)
-app.include_router(chat.router)
+app.include_router(compensation.router)
+app.include_router(analytics.router)
+app.include_router(snapshot.router)
 
 
 @app.get("/health")

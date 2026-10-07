@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.deps import get_current_agent, get_current_username
+from app.excel_export import build_sheet_xlsx, timestamped_filename
 from app.models import AgentCredential, AgentDetail, UserRegister
 from app.notification_service import create_notification
 from app.rank import is_valid_rank, normalize_rank, rank_label
@@ -199,6 +200,44 @@ def get_referral_info(
     }
 
 
+def _build_team_list(agent: AgentDetail, db: Session) -> list[dict]:
+    """Dựng danh sách đội ngũ trực tiếp (theo manage_id) của một agent."""
+    registrations = (
+        db.query(UserRegister)
+        .filter(UserRegister.manage_id == agent.id)
+        .filter(UserRegister.status.in_(["APPROVED", "ACTIVATED", "PROFILE_VERIFYING"]))
+        .order_by(UserRegister.created_datetime.desc())
+        .all()
+    )
+
+    team_list = []
+    for r in registrations:
+        # Check if this person has created an account (by email)
+        linked_agent = None
+        if r.email:
+            linked_agent = db.query(AgentDetail).filter_by(email=r.email).first()
+
+        team_list.append({
+            "id": r.id,
+            "fullname": r.fullname,
+            "phone": r.phone,
+            "email": r.email,
+            "register_code": r.register_code,
+            "status": r.status,
+            "type": r.type,
+            "has_account": linked_agent is not None,
+            "agent_refer_code": linked_agent.refer_code if linked_agent else None,
+            "rank": linked_agent.rank if linked_agent else None,
+            "rank_label": rank_label(linked_agent.rank if linked_agent else None),
+            "ekyc_status": "verified" if r.status == "APPROVED" else "pending",
+            "joined_date": r.created_datetime.strftime("%d/%m/%Y") if r.created_datetime else None,
+            # Future: add real sales data from contracts table
+            "sales_month": 0,
+            "active_contracts": 0,
+        })
+    return team_list
+
+
 @router.get("/team")
 def get_team_members(
     username: str = Depends(get_current_username),
@@ -209,47 +248,68 @@ def get_team_members(
     if not agent:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Agent không tồn tại.")
 
-    # Đội ngũ TRỰC TIẾP = các thành viên được Admin gán cho agent này quản lý (manage_id).
-    # CHỈ hiển thị thành viên đã được duyệt/kích hoạt (status = APPROVED).
-    registrations = (
-        db.query(UserRegister)
-        .filter(UserRegister.manage_id == agent.id)
-        .filter(UserRegister.status == "APPROVED")
-        .order_by(UserRegister.created_datetime.desc())
-        .all()
-    )
-
-    team_list = []
-    for r in registrations:
-        # CHỈ đưa vào đội ngũ thành viên đã có tài khoản trong AGENT_DETAIL (khớp qua email).
-        # Bỏ qua các bản ghi đăng ký chưa tạo tài khoản (pending).
-        if not r.email:
-            continue
-        linked_agent = db.query(AgentDetail).filter_by(email=r.email).first()
-        if not linked_agent:
-            continue
-
-        team_list.append({
-            "id": r.id,
-            "fullname": r.fullname,
-            "phone": r.phone,
-            "email": r.email,
-            "register_code": r.register_code,
-            "status": r.status,
-            "type": r.type,
-            "has_account": True,
-            "agent_refer_code": linked_agent.refer_code,
-            "ekyc_status": "verified" if r.status == "APPROVED" else "pending",
-            "joined_date": r.created_datetime.strftime("%d/%m/%Y") if r.created_datetime else None,
-            # Future: add real sales data from contracts table
-            "sales_month": 0,
-            "active_contracts": 0,
-        })
-
+    team_list = _build_team_list(agent, db)
     return {
         "total": len(team_list),
         "team": team_list,
     }
+
+
+_STATUS_LABELS = {
+    "APPROVED": "Đã duyệt (eKYC)",
+    "PROFILE_VERIFYING": "Chờ xét duyệt",
+    "ACTIVATED": "Đã tạo tài khoản",
+    "PENDING": "Chờ xử lý",
+}
+
+
+@router.get("/team/export")
+def export_team_excel(
+    username: str = Depends(get_current_username),
+    db: Session = Depends(get_db),
+):
+    """Xuất danh sách đội ngũ trực tiếp ra file Excel (.xlsx)."""
+    agent = db.query(AgentDetail).filter_by(username=username).first()
+    if not agent:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Agent không tồn tại.")
+
+    team_list = _build_team_list(agent, db)
+
+    headers = [
+        "STT", "Họ và tên", "Mã TVV", "Số điện thoại", "Email",
+        "Cấp bậc", "Trạng thái", "Đã có tài khoản", "Ngày tham gia",
+        "Doanh số tháng", "HĐ hiện tại",
+    ]
+    rows = []
+    for idx, m in enumerate(team_list, start=1):
+        rows.append([
+            idx,
+            m["fullname"] or "",
+            m["agent_refer_code"] or m["register_code"] or "",
+            m["phone"] or "",
+            m["email"] or "",
+            m.get("rank_label") or "Chưa xếp hạng",
+            _STATUS_LABELS.get((m["status"] or "").upper(), m["status"] or ""),
+            "Có" if m["has_account"] else "Chưa",
+            m["joined_date"] or "",
+            m["sales_month"] or 0,
+            m["active_contracts"] or 0,
+        ])
+
+    title = "DANH SÁCH ĐỘI NGŨ"
+    subtitle = (
+        f"Trưởng nhóm: {agent.full_name or agent.username or ''} • "
+        f"Tổng thành viên: {len(team_list)} • "
+        f"Xuất ngày {datetime.now().strftime('%d/%m/%Y %H:%M')}"
+    )
+    content = build_sheet_xlsx(title, headers, rows, sheet_name="Doi ngu", subtitle=subtitle)
+    filename = timestamped_filename("danh_sach_doi_ngu")
+
+    return Response(
+        content=content,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 # ─── Admin: Quản lý cấp bậc nhân viên ───────────────────────────────────────────
